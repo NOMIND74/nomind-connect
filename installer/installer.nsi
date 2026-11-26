@@ -74,8 +74,22 @@ Section "NOMIND Connect" SecMain
     Pop $0
   noOld:
 
-  ; Всё содержимое папки (staging готовится сборщиком, без runtime).
+  ; Всё содержимое папки (staging готовится сборщиком, без runtime и без данных).
   File /r "stage\*.*"
+
+  ; Эти файлы кладём только на чистую установку: при обновлении поверх
+  ; установленной версии серверы, настройки и список сайтов не затираются.
+  SetOverwrite off
+  ${IfNot} ${FileExists} "$INSTDIR\servers.json"
+    File "defaults\servers.json"
+  ${EndIf}
+  ${IfNot} ${FileExists} "$INSTDIR\settings.json"
+    File "defaults\settings.json"
+  ${EndIf}
+  ${IfNot} ${FileExists} "$INSTDIR\domains.txt"
+    File "defaults\domains.txt"
+  ${EndIf}
+  SetOverwrite on
 
   CreateDirectory "$INSTDIR\runtime"
 

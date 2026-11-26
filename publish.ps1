@@ -80,7 +80,7 @@ try {
     function Test-Forbidden([string]$rel) {
         if ($rel -match '(^|/)(servers|settings)\.json$') { return $true }
         if ($rel -match '(^|/)domains\.txt$') { return $true }
-        if ($rel -match '^(runtime|dist|installer/stage)/') { return $true }
+        if ($rel -match '^(runtime|dist|installer/stage|installer/defaults)/') { return $true }
         if ($rel -match '\.(exe|zip|7z|rar|log|bak|tmp|pem|key|pfx)$') { return $true }
         if ($rel -match '(^|/)\.env(\.|$)') { return $true }
         return $false

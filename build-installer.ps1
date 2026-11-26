@@ -38,34 +38,54 @@ Get-ChildItem (Join-Path $stage 'runtime') -Force -ErrorAction SilentlyContinue 
 New-Item -ItemType Directory -Path (Join-Path $stage 'runtime') -Force | Out-Null
 Get-ChildItem (Join-Path $stage '*.bak') -Force -ErrorAction SilentlyContinue | Remove-Item -Force
 
-# 2b. Chistye dannye v ustanovke: lichnye podpiski i serverov polzovatelya
-# v sborniku byt ne dolzhno - ustanovshik dolzhen stat s pustym spiskom.
-[IO.File]::WriteAllText((Join-Path $stage 'servers.json'), '[]', (New-Object Text.UTF8Encoding($false)))
-# domains.txt tozhe lichnyy (spisok sajtov polzovatelya) - v sbornik kladem
-# neytralnyy spisok iz repo.
+# 2a. Личные данные не входят в payload установщика вообще. Иначе обновление
+# поверх установленной версии затёрло бы серверы, настройки и список сайтов.
+foreach ($dataFile in @('servers.json', 'settings.json', 'domains.txt')) {
+    Remove-Item (Join-Path $stage $dataFile) -Force -ErrorAction SilentlyContinue
+}
+
+# 2b. Значения по умолчанию для чистой установки. Лежат отдельно от payload:
+# установщик кладёт их только если файла ещё нет.
+$defaults = Join-Path $inst 'defaults'
+if (Test-Path $defaults) { Remove-Item $defaults -Recurse -Force }
+New-Item -ItemType Directory -Path $defaults | Out-Null
+
+[IO.File]::WriteAllText((Join-Path $defaults 'servers.json'), '[]', (New-Object Text.UTF8Encoding($false)))
 $sampleDom = Join-Path $root 'domains.sample.txt'
 if (Test-Path -LiteralPath $sampleDom) {
-    Copy-Item -LiteralPath $sampleDom -Destination (Join-Path $stage 'domains.txt') -Force
+    Copy-Item -LiteralPath $sampleDom -Destination (Join-Path $defaults 'domains.txt') -Force
 } else {
-    [IO.File]::WriteAllText((Join-Path $stage 'domains.txt'), '', (New-Object Text.UTF8Encoding($false)))
+    [IO.File]::WriteAllText((Join-Path $defaults 'domains.txt'), '', (New-Object Text.UTF8Encoding($false)))
 }
-$srcSet = Join-Path $stage 'settings.json'
-if (Test-Path $srcSet) {
-    $old = Get-Content $srcSet -Raw -Encoding UTF8 | ConvertFrom-Json
-    $clean = [ordered]@{
-        mode           = $(if ($null -ne $old.mode) { $old.mode } else { 'global' })
-        httpPort       = $(if ($old.httpPort) { [int]$old.httpPort } else { 10809 })
-        socksPort      = $(if ($old.socksPort) { [int]$old.socksPort } else { 10808 })
-        ruDirect       = $(if ($null -ne $old.ruDirect) { [bool]$old.ruDirect } else { $true })
-        guardAutostart = $(if ($null -ne $old.guardAutostart) { [bool]$old.guardAutostart } else { $true })
-        blockAds       = $(if ($null -ne $old.blockAds) { [bool]$old.blockAds } else { $false })
-        closeToTray    = $(if ($null -ne $old.closeToTray) { [bool]$old.closeToTray } else { $true })
-        checkUpdates   = $(if ($null -ne $old.checkUpdates) { [bool]$old.checkUpdates } else { $true })
-        server         = ''
-        subs           = @()
-    }
-    [IO.File]::WriteAllText($srcSet, ($clean | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
+
+# настройки по умолчанию: режим и порты берём из текущих, но без личных полей
+$srcSet = Join-Path $dist 'settings.json'
+$clean = [ordered]@{
+    mode           = 'global'
+    httpPort       = 10809
+    socksPort      = 10808
+    ruDirect       = $true
+    guardAutostart = $true
+    blockAds       = $false
+    closeToTray    = $true
+    checkUpdates   = $true
+    server         = ''
+    subs           = @()
 }
+if (Test-Path -LiteralPath $srcSet) {
+    try {
+        $old = Get-Content $srcSet -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($old.mode -eq 'smart') { $clean.mode = 'smart' }
+        if ($old.httpPort) { $clean.httpPort = [int]$old.httpPort }
+        if ($old.socksPort) { $clean.socksPort = [int]$old.socksPort }
+        if ($null -ne $old.ruDirect) { $clean.ruDirect = [bool]$old.ruDirect }
+        if ($null -ne $old.guardAutostart) { $clean.guardAutostart = [bool]$old.guardAutostart }
+        if ($null -ne $old.blockAds) { $clean.blockAds = [bool]$old.blockAds }
+        if ($null -ne $old.closeToTray) { $clean.closeToTray = [bool]$old.closeToTray }
+        if ($null -ne $old.checkUpdates) { $clean.checkUpdates = [bool]$old.checkUpdates }
+    } catch { }
+}
+[IO.File]::WriteAllText((Join-Path $defaults 'settings.json'), ($clean | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
 
 # 3. Скрипт установщика в UTF-8 с BOM (иначе NSIS не поймёт русский текст)
 $nsi = Join-Path $inst 'installer.nsi'
@@ -91,6 +111,8 @@ $zipRoot = Join-Path $inst 'ziproot'
 if (Test-Path $zipRoot) { Remove-Item $zipRoot -Recurse -Force }
 New-Item -ItemType Directory -Path (Join-Path $zipRoot 'NOMIND Connect') -Force | Out-Null
 Copy-Item (Join-Path $stage '*') (Join-Path $zipRoot 'NOMIND Connect') -Recurse -Force
+# портативная сборка — как чистая установка: кладём данные по умолчанию
+Copy-Item (Join-Path $defaults '*') (Join-Path $zipRoot 'NOMIND Connect') -Force
 if (Test-Path $zip) { Remove-Item $zip -Force }
 [IO.Compression.ZipFile]::CreateFromDirectory($zipRoot, $zip, [IO.Compression.CompressionLevel]::Optimal, $false)
 Remove-Item $zipRoot -Recurse -Force
