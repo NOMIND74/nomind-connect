@@ -1,0 +1,67 @@
+# NOMIND Connect - allowlist repository.
+#
+# Rule: ignore EVERYTHING by default, then allow only known files.
+# User data must never be tracked:
+#   servers.json, settings.json, domains.txt, runtime/, subscriptions, HWID.
+
+*
+!*/
+
+# --- application source ---
+!/NOMINDConnect.ps1
+!/engine.ps1
+!/NOMINDGuard.ps1
+!/NOMINDStop.ps1
+!/NOMINDConnect.cmd
+!/NOMINDConnect.vbs
+!/NOMINDGuard.vbs
+
+# --- build, release and tooling ---
+!/build-installer.ps1
+!/publish.ps1
+!/scan-secrets.ps1
+!/release.ps1
+!/version.txt
+!/version.json
+!/installer/installer.nsi
+!/tools/
+!/tools/**
+
+# --- docs and static assets ---
+!/README.md
+!/nomind.ico
+!/nomind.png
+!/fonts/
+!/fonts/**
+
+# --- clean templates instead of real data ---
+!/servers.sample.json
+!/settings.sample.json
+
+# --- meta ---
+!/.gitignore
+!/.gitattributes
+!/.github/
+!/.github/**
+!/.opencode/agents/
+!/.opencode/agents/*.md
+
+# --- never, even if a rule above allows it ---
+*.exe
+*.zip
+*.7z
+*.rar
+*.log
+*.bak
+*.tmp
+*.pem
+*.key
+*.pfx
+.env
+.env.*
+/servers.json
+/settings.json
+/domains.txt
+/runtime/
+/dist/
+/installer/stage/

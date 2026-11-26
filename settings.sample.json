@@ -1,0 +1,11 @@
+{
+  "mode": "global",
+  "httpPort": 10809,
+  "socksPort": 10808,
+  "ruDirect": true,
+  "guardAutostart": true,
+  "blockAds": false,
+  "closeToTray": true,
+  "server": "",
+  "subs": []
+}
