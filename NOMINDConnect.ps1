@@ -2963,15 +2963,6 @@ function Show-SettingsDialog {
         Log ($(if ($on) { 'автопроверка обновлений включена' } else { 'автопроверка обновлений выключена' }))
     } 564
 
-    $lblUpd = New-Object ShadowLabel
-    $lblUpd.AutoSize = $false
-    $lblUpd.Location = New-Object Drawing.Point(20, 389)
-    $lblUpd.Size = New-Object Drawing.Size(320, 22)
-    $lblUpd.TextAlign = 'MiddleLeft'
-    $lblUpd.ForeColor = $script:C.Muted
-    $lblUpd.Font = $FLabel
-    $lblUpd.Text = (Get-LastUpdateCheckText)
-
     $btnCheck = New-Object ShadowButton
     $btnCheck.Text = 'Проверить обновления'
     Style-Button $btnCheck $false
@@ -2986,6 +2977,17 @@ function Show-SettingsDialog {
         $dlg.Close()
         Start-UpdateCheck -Manual
     })
+
+    # Shirina podpisi schitaetsya ot knopki: esli ona zahodit pod knopku,
+    # eyo fon zakrashivaet levyj kraj knopki ("nedokrasheno").
+    $lblUpd = New-Object ShadowLabel
+    $lblUpd.AutoSize = $false
+    $lblUpd.Location = New-Object Drawing.Point(20, 389)
+    $lblUpd.Size = New-Object Drawing.Size(($btnCheck.Left - 20 - 16), 22)
+    $lblUpd.TextAlign = 'MiddleLeft'
+    $lblUpd.ForeColor = $script:C.Muted
+    $lblUpd.Font = $FLabel
+    $lblUpd.Text = (Get-LastUpdateCheckText)
 
     $lblHint = New-Object ShadowLabel
     $lblHint.AutoSize = $false
@@ -3004,7 +3006,7 @@ function Show-SettingsDialog {
     $btnOk.Top = $dlg.ClientSize.Height - 18 - 38
     $btnOk.Add_Click({ $dlg.Close() })
 
-    $dlg.Controls.AddRange(@($rowApp, $rowGuard, $rowTray, $rowAds, $rowUpd, $lblUpd, $btnCheck, $lblHint, $btnOk))
+    $dlg.Controls.AddRange(@($rowApp, $rowGuard, $rowTray, $rowAds, $rowUpd, $btnCheck, $lblUpd, $lblHint, $btnOk))
     $dlg.AcceptButton = $btnOk
     $dlg.CancelButton = $btnOk
     [void]$dlg.ShowDialog($form)

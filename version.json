@@ -1,8 +1,8 @@
 {
-    "version":  "1.0.3",
-    "url":  "https://github.com/NOMIND74/nomind-connect/releases/download/v1.0.3/NOMIND-Connect-Setup.exe",
-    "sha256":  "e02d4325f9e0ecbd62b910f235497a71253980fcfb60d0ef8de0fb62b0ef892f",
+    "version":  "1.0.4",
+    "url":  "https://github.com/NOMIND74/nomind-connect/releases/download/v1.0.4/NOMIND-Connect-Setup.exe",
+    "sha256":  "a2a3f6813b050a32ba43e913de9692eb7bcb8cf02f4a170163fad3fad4cae199",
     "published":  "2026-11-26",
-    "notes":  "Плавная проверка пингов без мигания, змейка-индикатор по контуру списка, проверка обновлений в настройках.",
-    "signature":  "Rlk7+rqqjT1+/0+5Fp0vZ4FFru0yZjpBb8rL5DrZ50/3iTsvU8AOFD7v3oXZKlJma2/TKLX92irA8fcAApQpWg=="
+    "notes":  "Кнопка проверки обновлений: ровная заливка и отступы.",
+    "signature":  "B9mZnUB7xEEq9uQufuq5psmhp4bq6NBgl7P794xi2l8cdJuoh1U3O3i+ZZF0AbszWhdJC6CgHwhp59MnKludhQ=="
 }
