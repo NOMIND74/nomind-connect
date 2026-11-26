@@ -20,8 +20,9 @@ if ($s) { $port = [int]$s.httpPort }
 $ours = '127.0.0.1:' + $port
 
 # 1) The GUI is gone but xray survived (crash or forced kill during shutdown).
+$appScript = Join-Path $PSScriptRoot 'NOMINDConnect.ps1'
 $gui = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
-    Where-Object { $_.CommandLine -like '*NOMINDConnect.ps1*' } |
+    Where-Object { Test-IsOurScript $_.CommandLine $appScript } |
     Select-Object -First 1
 $engine = Get-EngineProcess
 if (!$gui -and $engine) {

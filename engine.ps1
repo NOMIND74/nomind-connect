@@ -31,6 +31,9 @@ if (!(Test-Path $script:Data)) { New-Item -ItemType Directory -Force -Path $scri
 $script:Bin  = Join-Path $script:Root 'bin'
 $script:Run  = Join-Path $script:Data 'runtime'
 $script:Exe  = Join-Path $script:Bin 'xray.exe'
+# Polnyj put: inache curl ishetsya v PATH i tekushem kataloge, i podmenennyj
+# curl.exe ryadom s programmoj mog by perehnvat vyzov.
+$script:Curl = Join-Path $env:SystemRoot 'System32\curl.exe'
 $script:CfgF = Join-Path $script:Data 'servers.json'
 $script:SetF = Join-Path $script:Data 'settings.json'
 $script:DomF = Join-Path $script:Data 'domains.txt'
@@ -176,7 +179,10 @@ function ConvertFrom-VlessLink([string]$link) {
 
     # sluzhebnye uzly (0.0.0.0:1) i nulevoy UUID - eto zaglushki panelej, a ne servery
     if (!$h -or $h -eq '0.0.0.0' -or $h -eq '127.0.0.1' -or $h -eq '::' -or $h -eq 'localhost') { throw 'служебный узел вместо сервера' }
-    if ($p -le 1) { throw 'неверный порт сервера' }
+    if ($p -le 1 -or $p -gt 65535) { throw 'неверный порт сервера' }
+    # host uhodit v argumenty dochernih processov i v konfig: tolko imya/IP,
+    # nikakih kavychek i probelov (inache mozhno podsunut lishnij argument)
+    if ($h -notmatch '^[A-Za-z0-9._\-:\[\]]+$') { throw 'недопустимый адрес сервера' }
     $uhex = $uuid -replace '[^0-9a-fA-F]', ''
     if (!$uhex -or $uhex -match '^0+$') { throw 'нулевой UUID вместо сервера' }
 
@@ -256,7 +262,23 @@ function Get-MachineHwid {
     return $script:MachineHwid
 }
 
+$script:MaxSubBytes = 4MB
+$script:MaxSubNodes = 3000
+
+function Test-HttpUrl([string]$url) {
+    # Tolko https: po http podpisku mozhno podmenit (MITM), a file:// i
+    # http://127.0.0.1 cherez HttpWebRequest chitayut lokalnye resursy.
+    if ([string]$url -notmatch '^https://') { return $false }
+    if ($url -match '["\s]') { return $false }
+    $u = $null
+    if (![Uri]::TryCreate($url, [UriKind]::Absolute, [ref]$u)) { return $false }
+    if ($u.Scheme -ne 'https') { return $false }
+    if (!$u.Host) { return $false }
+    return $true
+}
+
 function Get-SubscriptionResponse([string]$url, [string]$hwid) {
+    if (!(Test-HttpUrl $url)) { throw 'подписка должна быть по ссылке https://' }
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     # paneli s privyazkoy k ustroystvu (Remnawave i t.p.) ozhidayut HWID: bez nego oni
     # otdayut zaglushki. Berem ustoychivyy id etogo kompyutera, esli polzovatel ne ukazal svoj.
@@ -272,9 +294,20 @@ function Get-SubscriptionResponse([string]$url, [string]$hwid) {
         # paneli (Marzban/x-ui i t.p.) peredayut srok i trafik v zagolovke
         $userinfo = ''
         try { $userinfo = [string]$resp.Headers['subscription-userinfo'] } catch { }
-        $sr = New-Object IO.StreamReader($resp.GetResponseStream())
-        $raw = $sr.ReadToEnd()
-        $sr.Dispose()
+        # chitaem porciyami s limitom: sbitaya ili vrazhdebnaya panel ne dolzhna
+        # vyest pamyat i podvesit GUI
+        $len = [long]$resp.ContentLength
+        if ($len -gt $script:MaxSubBytes) { throw ('подписка слишком большая: ' + $len + ' байт') }
+        $ms = New-Object IO.MemoryStream
+        $stream = $resp.GetResponseStream()
+        $buf = New-Object byte[] 16384
+        $total = 0
+        while (($n = $stream.Read($buf, 0, $buf.Length)) -gt 0) {
+            $total += $n
+            if ($total -gt $script:MaxSubBytes) { throw 'подписка слишком большая (больше 4 МБ)' }
+            $ms.Write($buf, 0, $n)
+        }
+        $raw = [Text.Encoding]::UTF8.GetString($ms.ToArray())
     } finally { $resp.Close() }
     return [pscustomobject]@{ Text = $raw; UserInfo = $userinfo }
 }
@@ -333,6 +366,9 @@ function ConvertFrom-Subscription([string]$raw) {
             $parsed = ConvertFrom-Json $text
             $cfgs = @($parsed)
         } catch { throw 'не смог разобрать JSON-подписку' }
+        if ($cfgs.Count -gt $script:MaxSubNodes) {
+            throw ('в подписке слишком много конфигов: ' + $cfgs.Count + ' (лимит ' + $script:MaxSubNodes + ')')
+        }
         $links = New-Object System.Collections.ArrayList
         foreach ($c in $cfgs) {
             $ob = $null
@@ -404,6 +440,9 @@ function ConvertFrom-Subscription([string]$raw) {
         } catch { throw 'не смог разобрать ответ подписки' }
     }
     $links = @($text -split "[\r\n]+" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($links.Count -gt $script:MaxSubNodes) {
+        throw ('в подписке слишком много серверов: ' + $links.Count + ' (лимит ' + $script:MaxSubNodes + ')')
+    }
     return $links
 }
 
@@ -622,6 +661,26 @@ function Test-LocalPort([int]$port) {
     } catch { return $false } finally { $cli.Close() }
 }
 
+function Test-IsOurScript([string]$commandLine, [string]$expectedPath) {
+    # Sravnivaem imenno put iz -File, a ne podstroku v komandnoj stroke:
+    # inache Get-Content NOMINDConnect.ps1 ili chuzhoj skript s tem zhe imenem
+    # schitaetsya nashim prilozheniem i mozhet byt ubit.
+    if (!$commandLine -or !$expectedPath) { return $false }
+    $p = ''
+    $m = [regex]::Match($commandLine, '(?i)-File\s+"([^"]+)"')
+    if ($m.Success) { $p = $m.Groups[1].Value }
+    else {
+        $m = [regex]::Match($commandLine, '(?i)-File\s+([^\s"]+)')
+        if ($m.Success) { $p = $m.Groups[1].Value }
+    }
+    if (!$p) { return $false }
+    try {
+        $a = [IO.Path]::GetFullPath($p.Trim())
+        $b = [IO.Path]::GetFullPath($expectedPath)
+        return ($a -ieq $b)
+    } catch { return $false }
+}
+
 function Get-EngineProcess {
     $pidF = Join-Path $script:Run 'engine.pid'
     if (Test-Path $pidF) {
@@ -712,6 +771,19 @@ function Enable-SystemProxy([int]$port) {
     return $true
 }
 
+function Get-OurProxyServers {
+    # Nashi adresa proksi: 127.0.0.1:<httpPort> i :<socksPort> iz nastroyek.
+    $ports = @(10809, 10808)
+    try {
+        $s = Get-Settings
+        if ($s) {
+            if ($s.httpPort) { $ports = @([int]$s.httpPort) }
+            if ($s.socksPort) { $ports += [int]$s.socksPort }
+        }
+    } catch { }
+    return @($ports | ForEach-Object { '127.0.0.1:' + $_ })
+}
+
 function Disable-SystemProxy {
     $bak = Join-Path $script:Run 'proxy-backup.json'
     if (Test-Path $bak) {
@@ -721,6 +793,14 @@ function Disable-SystemProxy {
         Set-ItemProperty $script:Key -Name 'ProxyOverride' -Value ([string]$b.Override) -Type String
         Remove-Item $bak -Force -ErrorAction SilentlyContinue
     } else {
+        # Bekapa net - znachit my proksi ne vklyuchali (ili on uzhe sbroshen).
+        # Chuzhoj proksi (korotativnyj, ruchnoj) gasit nelzya: inache chelovek
+        # ostaetsya bez interneta i bez ponimaniya pochemu.
+        $cur = Get-SystemProxy
+        $isOurs = ((Get-OurProxyServers) -contains ([string]$cur.Server))
+        if ([int]$cur.Enable -eq 1 -and !$isOurs) {
+            return $false
+        }
         Set-ItemProperty $script:Key -Name 'ProxyEnable' -Value 0 -Type DWord
     }
     Ensure-WinInet
@@ -741,7 +821,7 @@ function Test-ServerTcp($n, [int]$timeout = 4000) {
 }
 
 function Get-Trace([int]$port, [string]$url) {
-    $out = & curl.exe -s -m 15 --proxy ('http://127.0.0.1:' + $port) $url 2>&1
+    $out = & $script:Curl -s -m 15 --proxy ('http://127.0.0.1:' + $port) $url 2>&1
     $txt = ($out | Out-String)
     $ip = ''
     $loc = ''
@@ -802,7 +882,7 @@ function Test-RealPing($n, $settings, [int]$timeoutMs = 12000, [int]$port = 1182
         }
         if (!$up) { return -1 }
         $sw = [Diagnostics.Stopwatch]::StartNew()
-        $code = (& curl.exe -s -o NUL -m 3 -w '%{http_code}' --proxy ('http://127.0.0.1:' + $port) 'https://cp.cloudflare.com/generate_204' 2>$null | Out-String).Trim()
+        $code = (& $script:Curl -s -o NUL -m 3 -w '%{http_code}' --proxy ('http://127.0.0.1:' + $port) 'https://cp.cloudflare.com/generate_204' 2>$null | Out-String).Trim()
         $ms = [int]$sw.ElapsedMilliseconds
         if ($code -match '^(204|200)$') { return $ms }
         return -1
@@ -882,7 +962,7 @@ function Invoke-BatchPing($nodes, $settings, [int]$basePort = 12200, [int]$reque
                 '-x', ('http://127.0.0.1:' + ($basePort + $i)),
                 'https://cp.cloudflare.com/generate_204'
             )
-            $cp = Start-Process -FilePath 'curl.exe' -ArgumentList $cargs -WindowStyle Hidden -RedirectStandardOutput $of -PassThru
+            $cp = Start-Process -FilePath $script:Curl -ArgumentList $cargs -WindowStyle Hidden -RedirectStandardOutput $of -PassThru
             [void]$reqs.Add([pscustomobject]@{ Key = $key; Proc = $cp; File = $of })
         }
 

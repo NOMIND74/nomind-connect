@@ -8,7 +8,12 @@ Usage:
 
 Exit codes: 0 = clean, 1 = findings, 2 = bad usage.
 
-A line may be exempted with the marker:  secret-scan:ignore
+A line may be exempted with the marker:  secret-scan:ignore <reason>
+The reason must be at least 8 characters, so an accidental marker does not
+silently hide a real secret.
+
+-Staged reads the blob from the git index (git cat-file blob), not the working
+tree: what you see in the commit is exactly what gets scanned.
 #>
 param(
     [switch]$Staged,
@@ -31,7 +36,10 @@ $rules = @(
     @{ Name = 'Private key block';   Pattern = '-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----' },
     @{ Name = 'Subscription URL';    Pattern = '(?i)https?://[^\s"''<>]+/(?:sub|subscription|subs)/[A-Za-z0-9_\-]{8,}' },
     @{ Name = 'HWID value';          Pattern = '(?i)"hwid"\s*:\s*"[A-Za-z0-9+/=_\-]{8,}"' },
-    @{ Name = 'Public IP with port'; Pattern = '\b(?:\d{1,3}\.){3}\d{1,3}:\d{2,5}\b' }
+    @{ Name = 'Public IP with port'; Pattern = '\b(?:\d{1,3}\.){3}\d{1,3}:\d{2,5}\b' },
+    @{ Name = 'JWT';                 Pattern = '\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b' },
+    @{ Name = 'Generic secret value'; Pattern = '(?i)\b(?:api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret)\s*[:=]\s*["''][^"''{}\$]{16,}["'']' },
+    @{ Name = 'Telegram bot token';  Pattern = '\b\d{8,10}:[A-Za-z0-9_\-]{35}\b' }
 )
 
 function Test-PrivateIP([string]$m) {
@@ -41,9 +49,34 @@ function Test-PrivateIP([string]$m) {
     return $false
 }
 
+function Test-Ignorable([string]$line) {
+    $m = [regex]::Match($line, '(?i)secret-scan:ignore\s*(\S{8,})')
+    return $m.Success
+}
+
+# base64 of a whole subscription or a single link hides it from plain regexes.
+function Find-EncodedSecrets([string]$line, [string]$rel, [int]$lineNo, $findings, $seen) {
+    $ms = [regex]::Matches($line, '[A-Za-z0-9+/=_\-]{40,}')
+    foreach ($m in $ms) {
+        $s = $m.Value -replace '-', '+' -replace '_', '/'
+        switch ($s.Length % 4) { 2 { $s += '==' } 3 { $s += '=' } }
+        $decoded = ''
+        try { $decoded = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($s)) } catch { continue }
+        if ($decoded -notmatch '(?i)(?:vless|vmess|trojan|hysteria2?|tuic|ss)://|https?://[^\s]+/(?:sub|subscription|subs)/') { continue }
+        $key = $rel + '|base64|' + $lineNo
+        if ($seen.ContainsKey($key)) { continue }
+        $seen[$key] = $true
+        [void]$findings.Add([pscustomobject]@{
+            File = $rel; Line = ($lineNo + 1); Rule = 'Base64-encoded link'; Preview = '<' + $m.Value.Length + ' chars>'
+        })
+    }
+}
+
 $files = New-Object System.Collections.ArrayList
+$useIndex = $false
 
 if ($Staged) {
+    $useIndex = $true
     Push-Location $Root
     try {
         $names = @(& git diff --cached --name-only --diff-filter=ACMR)
@@ -82,26 +115,45 @@ $findings = New-Object System.Collections.ArrayList
 $seen = @{}
 
 foreach ($rel in $unique) {
-    $full = Join-Path $Root ($rel -replace '/', '\')
     $bytes = $null
-    if (Test-Path -LiteralPath $full) {
-        $bytes = [IO.File]::ReadAllBytes($full)
-    } else {
-        Push-Location $Root
+    if ($useIndex) {
+        # Scan the exact blob that is staged for commit.
+        $tmp = [IO.Path]::GetTempFileName()
         try {
-            $raw = @(& git show (':' + $rel) 2>$null)
-            if ($LASTEXITCODE -ne 0) { $raw = @() }
-        } finally { Pop-Location }
-        $bytes = [Text.Encoding]::UTF8.GetBytes(($raw -join "`n"))
+            $p = Start-Process -FilePath 'git' -ArgumentList @('cat-file', 'blob', (':' + $rel)) -WorkingDirectory $Root -RedirectStandardOutput $tmp -WindowStyle Hidden -PassThru -Wait
+            if ($p.ExitCode -eq 0) { $bytes = [IO.File]::ReadAllBytes($tmp) }
+        } catch { $bytes = $null }
+        finally { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+    } else {
+        $full = Join-Path $Root ($rel -replace '/', '\')
+        if (Test-Path -LiteralPath $full) { $bytes = [IO.File]::ReadAllBytes($full) }
     }
     if (!$bytes -or $bytes.Length -eq 0) { continue }
-    if ([Array]::IndexOf($bytes, [byte]0) -ge 0) { continue }   # binary file, skipped
+
+    if ([Array]::IndexOf($bytes, [byte]0) -ge 0) {
+        # Binary: still look for link strings and key headers in the raw bytes.
+        $latin = [Text.Encoding]::GetEncoding(28591).GetString($bytes)
+        foreach ($rule in $rules) {
+            $ms = [regex]::Matches($latin, $rule.Pattern)
+            if ($ms.Count -eq 0) { continue }
+            foreach ($m in $ms) {
+                if ($rule.Name -eq 'Public IP with port' -and (Test-PrivateIP $m.Value)) { continue }
+                $key = $rel + '|bin|' + $rule.Name
+                if ($seen.ContainsKey($key)) { continue }
+                $seen[$key] = $true
+                [void]$findings.Add([pscustomobject]@{
+                    File = $rel; Line = 0; Rule = ('binary: ' + $rule.Name); Preview = ('<' + $m.Value.Length + ' chars>')
+                })
+            }
+        }
+        continue
+    }
 
     $text = [Text.Encoding]::UTF8.GetString($bytes)
     $lines = $text -split "`r?`n"
     for ($i = 0; $i -lt $lines.Length; $i++) {
         $line = $lines[$i]
-        if ($line -match 'secret-scan:ignore') { continue }
+        if (Test-Ignorable $line) { continue }
         foreach ($rule in $rules) {
             $ms = [regex]::Matches($line, $rule.Pattern)
             if ($ms.Count -eq 0) { continue }
@@ -110,13 +162,12 @@ foreach ($rel in $unique) {
                 $key = $rel + '|' + $rule.Name + '|' + $i
                 if ($seen.ContainsKey($key)) { continue }
                 $seen[$key] = $true
-                $preview = $m.Value
-                if ($preview.Length -gt 10) { $preview = $preview.Substring(0, 10) + '...' }
                 [void]$findings.Add([pscustomobject]@{
-                    File = $rel; Line = ($i + 1); Rule = $rule.Name; Preview = $preview
+                    File = $rel; Line = ($i + 1); Rule = $rule.Name; Preview = ('<' + $m.Value.Length + ' chars>')
                 })
             }
         }
+        Find-EncodedSecrets $line $rel $i $findings $seen
     }
 }
 

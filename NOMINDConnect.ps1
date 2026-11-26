@@ -2019,20 +2019,20 @@ function Start-PingScan([string]$onlyKey = '') {
     $script:PingProcs = @()
     $script:PingFiles = @()
     $eng = Join-Path $PSScriptRoot 'engine.ps1'
-    # puti v kavychkah: v papke s probelom ("NOMIND Connect") inache argumenty raskidyvayutsya
+    # Puti i dannye peredayutsya otdelnymi argumentami v kavychkah (sm. Start-EngineChild):
+    # nikakaya stroka iz seti ne skleivaetsya v komandnuyu stroku.
     try {
         if ($onlyKey) {
             $f = $script:PingFile
             try { Remove-Item $f -Force -ErrorAction SilentlyContinue } catch { }
-            $argStr = '-NoProfile -ExecutionPolicy Bypass -File "' + $eng + '" -Action pingall -OutFile "' + $f + '" -Server "' + $onlyKey + '"'
-            $script:PingProcs = @(Start-Process -FilePath 'powershell.exe' -ArgumentList $argStr -WindowStyle Hidden -PassThru)
+            $key = ([string]$onlyKey).Replace('"', '')
+            $script:PingProcs = @(Start-EngineChild @('-Action', 'pingall', '-Server', $key) $f)
             $script:PingFiles = @($f)
         } elseif ($script:PingFast) {
             # один xray на все узлы + параллельные curl: полный прогон за секунды
             $f = $script:PingFile
             try { Remove-Item $f -Force -ErrorAction SilentlyContinue } catch { }
-            $argStr = '-NoProfile -ExecutionPolicy Bypass -File "' + $eng + '" -Action pingfast -OutFile "' + $f + '"'
-            $script:PingProcs = @(Start-Process -FilePath 'powershell.exe' -ArgumentList $argStr -WindowStyle Hidden -PassThru)
+            $script:PingProcs = @(Start-EngineChild @('-Action', 'pingfast') $f)
             $script:PingFiles = @($f)
         } else {
             # старый путь: несколько процессов, по узлу за раз (аварийный откат)
@@ -2044,8 +2044,7 @@ function Start-PingScan([string]$onlyKey = '') {
                 $f = Join-Path $script:Run ('auto-ping.' + $k + '.json')
                 try { Remove-Item $f -Force -ErrorAction SilentlyContinue } catch { }
                 $files += $f
-                $argStr = '-NoProfile -ExecutionPolicy Bypass -File "' + $eng + '" -Action pingall -OutFile "' + $f + '" -Part ' + $k + ' -Parts ' + $n
-                $procs += Start-Process -FilePath 'powershell.exe' -ArgumentList $argStr -WindowStyle Hidden -PassThru
+                $procs += Start-EngineChild @('-Action', 'pingall', '-Part', ([string]$k), '-Parts', ([string]$n)) $f
             }
             $script:PingProcs = @($procs)
             $script:PingFiles = @($files)
@@ -2063,10 +2062,12 @@ function Stop-PingScan {
     foreach ($p in @($script:PingProcs)) {
         try { if ($p -and !$p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } } catch { }
     }
-    # ubiraem xray, ostavshiesya ot prervannoy proverki
+    # ubiraem xray, ostavshiesya ot prervannoy proverki (tolko nashi konfigi
+    # iz runtime, a ne lyuboj process s pohozhim imenem fajla)
     try {
+        $runPat = [regex]::Escape($script:Run) + '\\ping[a-z0-9]*-config\.json'
         Get-CimInstance Win32_Process -Filter "Name='xray.exe'" -ErrorAction SilentlyContinue |
-            Where-Object { $_.CommandLine -match 'pingbatch-config\.json|ping\d*-config\.json|pingfb-config\.json' } |
+            Where-Object { $_.CommandLine -match $runPat } |
             ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch { } }
     } catch { }
     # to, chto uzhe uspeli proverit, pokazyvaem srazu
@@ -2089,6 +2090,19 @@ $script:UpdPrompted = $false
 $script:UpdManual = $false
 $script:UpdWaitTo = $null
 $script:UpdFetchWaitTo = $null
+
+# Odin argument dochernego processa, zhestko v kavychkah. Kazhdoe znachenie
+# peredaetsya otdelno: nikakie dannye iz seti ne skleivayutsya v odnu stroku.
+function Quote-ChildArg([string]$v) {
+    return '"' + ([string]$v).Replace('"', '') + '"'
+}
+
+function Start-EngineChild([string[]]$ActionArgs, [string]$OutFile) {
+    $eng = Join-Path $PSScriptRoot 'engine.ps1'
+    $pArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Quote-ChildArg $eng)) + $ActionArgs
+    if ($OutFile) { $pArgs += @('-OutFile', (Quote-ChildArg $OutFile)) }
+    return (Start-Process -FilePath 'powershell.exe' -ArgumentList $pArgs -WindowStyle Hidden -PassThru)
+}
 
 function Write-UpdLog([string]$m) {
     try {
@@ -2113,10 +2127,8 @@ function Start-UpdateCheck([switch]$Manual) {
     $script:UpdManual = [bool]$Manual
     $script:UpdWaitTo = $null
     try { Remove-Item $script:UpdFile -Force -ErrorAction SilentlyContinue } catch { }
-    $eng = Join-Path $PSScriptRoot 'engine.ps1'
-    $argStr = '-NoProfile -ExecutionPolicy Bypass -File "' + $eng + '" -Action updatecheck -OutFile "' + $script:UpdFile + '"'
     try {
-        $script:UpdProc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argStr -WindowStyle Hidden -PassThru
+        $script:UpdProc = Start-EngineChild @('-Action', 'updatecheck') $script:UpdFile
         if ($Manual) {
             Log 'проверяю обновления…'
             try { $lblInfo.Text = 'проверяю обновления…' } catch { }
@@ -2132,11 +2144,13 @@ function Start-UpdateFetch($u) {
     $script:UpdPending = $u
     $script:UpdFetchWaitTo = $null
     try { Remove-Item $script:UpdFetchFile -Force -ErrorAction SilentlyContinue } catch { }
-    $eng = Join-Path $PSScriptRoot 'engine.ps1'
-    $argStr = '-NoProfile -ExecutionPolicy Bypass -File "' + $eng + '" -Action updatefetch -OutFile "' + $script:UpdFetchFile + '"' +
-              ' -Ver "' + ([string]$u.Version) + '" -Sha "' + ([string]$u.Sha256) + '" -Url "' + ([string]$u.Url) + '"'
     try {
-        $script:UpdFetchProc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argStr -WindowStyle Hidden -PassThru
+        $script:UpdFetchProc = Start-EngineChild @(
+            '-Action', 'updatefetch',
+            '-Ver', ([string]$u.Version),
+            '-Sha', ([string]$u.Sha256),
+            '-Url', ([string]$u.Url)
+        ) $script:UpdFetchFile
         Log ('обновление: скачиваю версию ' + $u.Version)
         try { $lblInfo.Text = 'скачиваю обновление…' } catch { }
     } catch {
@@ -2171,7 +2185,32 @@ function Complete-UpdateFetch {
         Show-NomindBox -Title 'обновление' -Message ('Не удалось скачать обновление: ' + $err) -Danger | Out-Null
         return
     }
+    # Файл результата лежит в runtime и его можно подменить локально. Поэтому
+    # доверяем только ожидаемому имени в %TEMP% и заново сверяем SHA-256,
+    # полученный из подписанного манифеста ($u).
     $ver = if ($u) { [string]$u.Version } else { '' }
+    $sha = if ($u) { [string]$u.Sha256 } else { '' }
+    $verClean = $ver -replace '[^0-9.]', ''
+    $expected = Join-Path $env:TEMP ('NOMIND-Connect-Setup-' + $verClean + '.exe')
+    $pathOk = $false
+    try {
+        $pathOk = ([IO.Path]::GetFullPath([string]$r.Path) -ieq [IO.Path]::GetFullPath($expected))
+    } catch { $pathOk = $false }
+    if (!$pathOk -or $sha -notmatch '^[0-9a-fA-F]{64}$') {
+        Write-UpdLog ('rejected installer path/hash: ' + [string]$r.Path)
+        Log 'обновление: установщик отклонён (путь или хеш не совпали)'
+        Show-NomindBox -Title 'обновление' -Message 'Установщик не прошёл проверку и не будет запущен.' -Danger | Out-Null
+        return
+    }
+    $rehash = ''
+    try { $rehash = (Get-FileHash -LiteralPath ([string]$r.Path) -Algorithm SHA256).Hash.ToLower() } catch { $rehash = '' }
+    if ($rehash -ne $sha.ToLower()) {
+        try { Remove-Item -LiteralPath ([string]$r.Path) -Force -ErrorAction SilentlyContinue } catch { }
+        Write-UpdLog 'rejected installer: hash mismatch before launch'
+        Log 'обновление: хеш установщика не совпал — файл удалён'
+        Show-NomindBox -Title 'обновление' -Message 'Файл обновления повреждён и удалён. Попробуйте позже.' -Danger | Out-Null
+        return
+    }
     Write-UpdLog ('downloaded and verified: ' + $r.Path)
     Show-NomindBox -Title 'обновление готово' -Message ('Обновление ' + $ver + " скачано и проверено.`r`n`r`nЗакрыть NOMIND Connect и запустить установщик?") -Yes 'Установить' -No 'Позже' | Out-Null
     if ($script:BoxResult -ne 'Yes') {
@@ -3430,13 +3469,13 @@ function Get-SubHost([string]$url) {
 }
 
 function Get-SubTitle([string]$url) {
+    # Tolko host: v puti obychno lezhit token podpiski, a on popadaet v
+    # soobsheniya ob oshibkah i na ekran.
     try {
         $u = [Uri]$url
-        $p = $u.AbsolutePath.Trim('/')
-        if ($p) { return ($u.Host + ' · ' + $p) }
-        return $u.Host
+        if ($u.Host) { return $u.Host }
     } catch { }
-    return $url
+    return 'подписка'
 }
 
 function Update-SubBadge {
@@ -4275,7 +4314,8 @@ $form.Add_Shown({
                 } else {
                     $script:TPS.Stop()
                     Start-Sleep -Milliseconds 400
-                    $n = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like '*-Action pingall*' }).Count
+                    $engPat = [regex]::Escape((Join-Path $PSScriptRoot 'engine.ps1'))
+                    $n = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match $engPat -and $_.CommandLine -match '-Action\s+pingall' }).Count
                     [IO.File]::AppendAllText((Join-Path $script:Run 'gui.err.log'), ((Get-Date -Format 'HH:mm:ss') + '  pingstop: busy after=' + (Test-PingBusy) + ' procs=' + $n + "`r`n"), (New-Object Text.UTF8Encoding($true)))
                 }
             } catch { Write-UiError 'pingstop' $_.Exception }

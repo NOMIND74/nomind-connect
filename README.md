@@ -9,7 +9,7 @@ VLESS + REALITY, включая XHTTP-узлы, которые Podkop (sing-box)
 ## Как запустить
 
 - Ярлык на рабочем столе: **NOMIND Connect** (иконка — фиолетовая овца с розовым рим-лайтом)
-- или файл `W:\Project\myconnect\NOMINDConnect.cmd`
+- или файл `NOMINDConnect.cmd` в папке программы
 
 Пока окно открыто — VPN работает. Закрыли окно — Xray гаснет, системный прокси
 возвращается в исходное состояние.
@@ -171,7 +171,7 @@ Discord, Spotify, игры просто переживают короткий (�
 Если что-то зависло (например, xray остался висеть после аварийного завершения):
 
 ```
-powershell -File W:\Project\myconnect\engine.ps1 -Action reset
+powershell -File engine.ps1 -Action reset
 ```
 
 — гасит xray и выключает системный прокси.
@@ -279,8 +279,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\release.ps1 -Notes "что
 При запуске программа сама прописывает сторожа в автозапуск (если рабочей записи ещё нет),
 поэтому интернет не пропадёт даже после жёсткого выключения компьютера с включённым VPN.
 
-Пересобрать ярлык-запускалку: `csc.exe /target:winexe /win32icon:nomind.ico` из
-`%TEMP%\opencode\launcher.cs` (запускает `powershell.exe -File NOMINDConnect.ps1` рядом с собой).
+Пересобрать ярлык-запускалку можно из `NOMINDConnect.vbs`: он запускает
+`powershell.exe -File NOMINDConnect.ps1` рядом с собой, без окна консоли.
 
 ## Важные ограничения
 
@@ -309,9 +309,3 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\release.ps1 -Notes "что
 3. Если у узла «не грузит» — он живой по TCP, но не пропускает трафик: выберите другой.
 4. Совсем плохо — закройте окно приложения или выполните `engine.ps1 -Action reset`:
    прокси выключится, интернет вернётся.
-
-## Связанные файлы
-
-- `W:\Project\podkop\servers.md` — список серверов и история подписок.
-- `W:\Project\podkop\status.html` — состояние роутера.
-- `W:\Project\podkop\live.html` — живая доска проекта.

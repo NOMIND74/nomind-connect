@@ -48,6 +48,7 @@ function Test-ManifestFields($m) {
     if ([string]$m.version -notmatch '^\d{1,3}\.\d{1,3}\.\d{1,3}$') { return $false }
     if ([string]$m.sha256 -notmatch '^[0-9a-fA-F]{64}$') { return $false }
     if ([string]$m.url -notmatch '^https://') { return $false }
+    if ([string]$m.url -notmatch '^https://[A-Za-z0-9._~:/?#\[\]@!$&''()*+,;=%-]+$') { return $false }
     if (([string]$m.url).Length -gt 512) { return $false }
     if ([string]$m.published -notmatch '^\d{4}-\d{2}-\d{2}$') { return $false }
     if ([string]$m.signature -notmatch '^[A-Za-z0-9+/=]{40,200}$') { return $false }
