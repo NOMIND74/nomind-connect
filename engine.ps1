@@ -1039,13 +1039,21 @@ if ($Action) {
             if (!$node) { $node = Find-Server $s.server $list }
             if (!$node) { throw 'Server not found' }
             $dom = Get-Domains
-            $p = Start-Engine $node $s $dom
-            Enable-SystemProxy ([int]$s.httpPort) | Out-Null
-            $tr = Get-Trace ([int]$s.httpPort) 'https://chatgpt.com/cdn-cgi/trace'
-            'engine pid  : ' + $p.Id
-            'server      : ' + $node.name + '  ' + (Get-ServerKey $node)
-            'mode        : ' + $s.mode
-            'exit ip     : ' + $tr.Ip + '  loc=' + $tr.Loc
+            try {
+                $p = Start-Engine $node $s $dom
+                Enable-SystemProxy ([int]$s.httpPort) | Out-Null
+                $tr = Get-Trace ([int]$s.httpPort) 'https://chatgpt.com/cdn-cgi/trace'
+                'engine pid  : ' + $p.Id
+                'server      : ' + $node.name + '  ' + (Get-ServerKey $node)
+                'mode        : ' + $s.mode
+                'exit ip     : ' + $tr.Ip + '  loc=' + $tr.Loc
+            } catch {
+                # Ne ostavlyaem sistemnyj proksi vklyuchennym na mertvyj tunnel:
+                # inache posle neudachi "propadaet internet".
+                try { Stop-Engine | Out-Null } catch { }
+                try { Disable-SystemProxy | Out-Null } catch { }
+                throw
+            }
         }
         'stop' {
             Stop-Engine | Out-Null

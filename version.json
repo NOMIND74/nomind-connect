@@ -1,8 +1,8 @@
 {
-    "version":  "1.0.1",
-    "url":  "https://github.com/NOMIND74/nomind-connect/releases/download/v1.0.1/NOMIND-Connect-Setup.exe",
-    "sha256":  "ba3b43c00cc8431af612a3ad5b341d105f6812f97ea6060498f987e6ebd05832",
+    "version":  "1.0.2",
+    "url":  "https://github.com/NOMIND74/nomind-connect/releases/download/v1.0.2/NOMIND-Connect-Setup.exe",
+    "sha256":  "eb7ba411d7fe939f94140c262f83b131682b43a64bda238ed3ed84dfc8af4191",
     "published":  "2026-11-26",
-    "notes":  "Первый публичный релиз: ускоренный пинг, подписанные автообновления, корректное выключение VPN.",
-    "signature":  "kKrO98lEH/fRl3EAc3KJ/NPcz7diAqD/rt9wKylGD3ylK2xQegpYhu7MhR+rI9aeXp9xwV+yTcHY0YYr23m3+w=="
+    "notes":  "Cleans up the system proxy if a connection attempt fails; download links in README.",
+    "signature":  "T0mmCeTg8Fj/73a243rqP9i/BvBZ8jesUzHpqijxTs9gqgsjDtmJUEuC3DPYL58orQOa6YXiLMQP722fXsgwBQ=="
 }
