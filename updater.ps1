@@ -11,7 +11,7 @@ Public key is embedded below. Private key lives in
 #>
 
 # Set after the repository exists, e.g. 'someuser/nomind-connect'.
-$script:UpdateRepo = 'OWNER/nomind-connect'
+$script:UpdateRepo = 'NOMIND74/nomind-connect'
 
 # base64(X || Y) of the ECDSA P-256 public key.
 $script:UpdatePubKey = '1OzVC4Qr6WO08Pp00fwSgqdODUiRxXgybN5nhPEYsbqNK8ZEe3wHR22sZge77zIMOtuPtfwxYbHVV9+RflnAsA=='
