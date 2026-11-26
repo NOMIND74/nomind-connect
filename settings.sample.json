@@ -6,6 +6,7 @@
   "guardAutostart": true,
   "blockAds": false,
   "closeToTray": true,
+  "checkUpdates": true,
   "server": "",
   "subs": []
 }

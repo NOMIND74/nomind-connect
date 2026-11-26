@@ -6,7 +6,12 @@
 !include "x64.nsh"
 
 !define APPNAME      "NOMIND Connect"
-!define APPVERSION   "1.0"
+!ifndef APPVERSION
+  !define APPVERSION "1.0"
+!endif
+!ifndef APPVERSION4
+  !define APPVERSION4 "1.0.0.0"
+!endif
 !define COMPANY      "NOMIND"
 !define EXENAME      "NOMIND Connect.exe"
 !define UNKEY        "Software\Microsoft\Windows\CurrentVersion\Uninstall\NOMIND Connect"
@@ -22,10 +27,10 @@ SetCompressor /SOLID lzma
 ShowInstDetails show
 ShowUninstDetails show
 
-VIProductVersion "1.0.0.0"
+VIProductVersion "${APPVERSION4}"
 VIAddVersionKey "ProductName" "${APPNAME}"
 VIAddVersionKey "FileDescription" "Установщик NOMIND Connect"
-VIAddVersionKey "FileVersion" "1.0.0.0"
+VIAddVersionKey "FileVersion" "${APPVERSION4}"
 VIAddVersionKey "ProductVersion" "${APPVERSION}"
 VIAddVersionKey "CompanyName" "${COMPANY}"
 VIAddVersionKey "LegalCopyright" "${COMPANY}"

@@ -13,6 +13,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName Microsoft.VisualBasic
 . (Join-Path $PSScriptRoot 'engine.ps1')
+. (Join-Path $PSScriptRoot 'updater.ps1')
 
 # один экземпляр за раз
 if (!$SelfTest) {
@@ -1423,11 +1424,13 @@ $miTrayPing = New-TrayItem 'Проверить все серверы' $script:C.
 $miTrayPing.Add_Click({ Do-PingAll })
 $miTraySettings = New-TrayItem 'Настройки…' $script:C.Gold
 $miTraySettings.Add_Click({ Show-AppWindow; Show-SettingsDialog })
+$miTrayUpdate = New-TrayItem 'Проверить обновления…' $script:C.Muted
+$miTrayUpdate.Add_Click({ Show-AppWindow; Start-UpdateCheck -Manual })
 $miTraySep = New-Object Windows.Forms.ToolStripSeparator
 $miTrayExit = New-TrayItem 'Выход (выключить VPN)' $script:C.Red
 $miTrayExit.Add_Click({ $script:Exiting = $true; $form.Close() })
 
-$trayMenu.Items.AddRange(@($miTrayOpen, $script:TrayConn, $miTrayPing, $miTraySettings, $miTraySep, $miTrayExit))
+$trayMenu.Items.AddRange(@($miTrayOpen, $script:TrayConn, $miTrayPing, $miTraySettings, $miTrayUpdate, $miTraySep, $miTrayExit))
 
 $script:Tray = New-Object Windows.Forms.NotifyIcon
 if ($script:IcoSmall) { $script:Tray.Icon = $script:IcoSmall }
@@ -1987,6 +1990,7 @@ $script:PingSeen = @{}
 $script:PingEveryMin = 10
 $script:PingWaitTo = $null
 $script:PingParts = 3
+$script:PingFast = $true
 $script:Pulse = 0.0
 
 function Test-PingBusy {
@@ -2023,8 +2027,15 @@ function Start-PingScan([string]$onlyKey = '') {
             $argStr = '-NoProfile -ExecutionPolicy Bypass -File "' + $eng + '" -Action pingall -OutFile "' + $f + '" -Server "' + $onlyKey + '"'
             $script:PingProcs = @(Start-Process -FilePath 'powershell.exe' -ArgumentList $argStr -WindowStyle Hidden -PassThru)
             $script:PingFiles = @($f)
+        } elseif ($script:PingFast) {
+            # один xray на все узлы + параллельные curl: полный прогон за секунды
+            $f = $script:PingFile
+            try { Remove-Item $f -Force -ErrorAction SilentlyContinue } catch { }
+            $argStr = '-NoProfile -ExecutionPolicy Bypass -File "' + $eng + '" -Action pingfast -OutFile "' + $f + '"'
+            $script:PingProcs = @(Start-Process -FilePath 'powershell.exe' -ArgumentList $argStr -WindowStyle Hidden -PassThru)
+            $script:PingFiles = @($f)
         } else {
-            # neskolko processov parallelno - proverka idet v 3-4 raza bystree
+            # старый путь: несколько процессов, по узлу за раз (аварийный откат)
             $n = [Math]::Max(1, [int]$script:PingParts)
             $procs = @()
             $files = @()
@@ -2055,7 +2066,7 @@ function Stop-PingScan {
     # ubiraem xray, ostavshiesya ot prervannoy proverki
     try {
         Get-CimInstance Win32_Process -Filter "Name='xray.exe'" -ErrorAction SilentlyContinue |
-            Where-Object { $_.CommandLine -match 'ping\d*-config\.json' } |
+            Where-Object { $_.CommandLine -match 'pingbatch-config\.json|ping\d*-config\.json|pingfb-config\.json' } |
             ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch { } }
     } catch { }
     # to, chto uzhe uspeli proverit, pokazyvaem srazu
@@ -2065,6 +2076,121 @@ function Stop-PingScan {
     Update-PingButton
     try { $lblInfo.Text = 'проверка остановлена' } catch { }
     Log 'проверка пингов остановлена'
+}
+
+# ---------------- updates ----------------
+
+$script:UpdProc = $null
+$script:UpdFile = Join-Path $script:Run 'update-check.json'
+$script:UpdFetchProc = $null
+$script:UpdFetchFile = Join-Path $script:Run 'update-fetch.json'
+$script:UpdPending = $null
+$script:UpdPrompted = $false
+$script:UpdManual = $false
+$script:UpdWaitTo = $null
+$script:UpdFetchWaitTo = $null
+
+function Write-UpdLog([string]$m) {
+    try {
+        [IO.File]::AppendAllText((Join-Path $script:Run 'updater.log'),
+            ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + '  ' + $m + "`r`n"),
+            (New-Object Text.UTF8Encoding($true)))
+    } catch { }
+}
+
+function Read-UpdateJson([string]$file) {
+    if (!$file -or !(Test-Path $file)) { return $null }
+    try {
+        $raw = [IO.File]::ReadAllText($file)
+        if (!$raw.Trim()) { return $null }
+        return ($raw | ConvertFrom-Json)
+    } catch { return $null }
+}
+
+function Start-UpdateCheck([switch]$Manual) {
+    if ($script:UpdProc -and !$script:UpdProc.HasExited) { return }
+    if (!$Manual -and (!$script:UpdateRepo -or $script:UpdateRepo -match '^OWNER/')) { return }
+    $script:UpdManual = [bool]$Manual
+    $script:UpdWaitTo = $null
+    try { Remove-Item $script:UpdFile -Force -ErrorAction SilentlyContinue } catch { }
+    $eng = Join-Path $PSScriptRoot 'engine.ps1'
+    $argStr = '-NoProfile -ExecutionPolicy Bypass -File "' + $eng + '" -Action updatecheck -OutFile "' + $script:UpdFile + '"'
+    try {
+        $script:UpdProc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argStr -WindowStyle Hidden -PassThru
+        if ($Manual) {
+            Log 'проверяю обновления…'
+            try { $lblInfo.Text = 'проверяю обновления…' } catch { }
+        }
+    } catch {
+        $script:UpdProc = $null
+        Write-UpdLog ('cannot start check: ' + $_.Exception.Message)
+    }
+}
+
+function Start-UpdateFetch($u) {
+    if ($script:UpdFetchProc -and !$script:UpdFetchProc.HasExited) { return }
+    $script:UpdPending = $u
+    $script:UpdFetchWaitTo = $null
+    try { Remove-Item $script:UpdFetchFile -Force -ErrorAction SilentlyContinue } catch { }
+    $eng = Join-Path $PSScriptRoot 'engine.ps1'
+    $argStr = '-NoProfile -ExecutionPolicy Bypass -File "' + $eng + '" -Action updatefetch -OutFile "' + $script:UpdFetchFile + '"' +
+              ' -Ver "' + ([string]$u.Version) + '" -Sha "' + ([string]$u.Sha256) + '" -Url "' + ([string]$u.Url) + '"'
+    try {
+        $script:UpdFetchProc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argStr -WindowStyle Hidden -PassThru
+        Log ('обновление: скачиваю версию ' + $u.Version)
+        try { $lblInfo.Text = 'скачиваю обновление…' } catch { }
+    } catch {
+        $script:UpdFetchProc = $null
+        Write-UpdLog ('cannot start download: ' + $_.Exception.Message)
+        Show-NomindBox -Title 'обновление' -Message ('Не удалось начать загрузку: ' + $_.Exception.Message) -Danger | Out-Null
+    }
+}
+
+function Show-UpdatePrompt($u) {
+    $msg = 'Доступна версия ' + $u.Version + ' (у вас ' + $u.Current + ').'
+    if ($u.Notes) { $msg += "`r`n`r`n" + $u.Notes }
+    $msg += "`r`n`r`nСкачать и установить?"
+    Show-NomindBox -Title 'обновление' -Message $msg -Yes 'Скачать' -No 'Позже' | Out-Null
+    if ($script:BoxResult -eq 'Yes') { Start-UpdateFetch $u }
+    else { try { $lblInfo.Text = 'обновление отложено' } catch { } }
+}
+
+function Complete-UpdateFetch {
+    $r = Read-UpdateJson $script:UpdFetchFile
+    $u = $script:UpdPending
+    $script:UpdFetchProc = $null
+    if (!$r) {
+        Write-UpdLog 'download result is unreadable'
+        Log 'обновление: не смог прочитать результат загрузки'
+        return
+    }
+    if (!$r.Ok -or !$r.Path -or !(Test-Path ([string]$r.Path))) {
+        $err = if ($r.Error) { [string]$r.Error } else { 'установщик не найден' }
+        Write-UpdLog ('download failed: ' + $err)
+        Log ('обновление: ' + $err)
+        Show-NomindBox -Title 'обновление' -Message ('Не удалось скачать обновление: ' + $err) -Danger | Out-Null
+        return
+    }
+    $ver = if ($u) { [string]$u.Version } else { '' }
+    Write-UpdLog ('downloaded and verified: ' + $r.Path)
+    Show-NomindBox -Title 'обновление готово' -Message ('Обновление ' + $ver + " скачано и проверено.`r`n`r`nЗакрыть NOMIND Connect и запустить установщик?") -Yes 'Установить' -No 'Позже' | Out-Null
+    if ($script:BoxResult -ne 'Yes') {
+        Log 'обновление: установка отложена'
+        return
+    }
+    # Перед установкой снимаем прокси и гасим xray: установщик перезапишет файлы.
+    try { Disable-SystemProxy | Out-Null } catch { }
+    try { Stop-Engine | Out-Null } catch { }
+    try {
+        Start-Process -FilePath ([string]$r.Path)
+        Log ('обновление: запущен установщик ' + $ver)
+    } catch {
+        Write-UpdLog ('cannot start installer: ' + $_.Exception.Message)
+        Show-NomindBox -Title 'обновление' -Message ('Не удалось запустить установщик: ' + $_.Exception.Message) -Danger | Out-Null
+        return
+    }
+    $script:Exiting = $true
+    $form.Close()
 }
 
 function Set-PingInPlace([string]$key) {
@@ -4054,6 +4180,64 @@ $form.Add_Shown({
         }
     })
     $script:UiTick.Start()
+
+    # proverka obnovleniy: tihaya pri zapuske + ruchnaya iz treya
+    $script:UpdWatch = New-Object Windows.Forms.Timer
+    $script:UpdWatch.Interval = 700
+    $script:UpdWatch.Add_Tick({
+        trap { continue }
+        if ($script:UpdProc) {
+            if (!$script:UpdProc.HasExited) { return }
+            if (!$script:UpdWaitTo) { $script:UpdWaitTo = (Get-Date).AddSeconds(1); return }
+            if ((Get-Date) -lt $script:UpdWaitTo) { return }
+            $u = Read-UpdateJson $script:UpdFile
+            $manual = $script:UpdManual
+            $script:UpdProc = $null
+            $script:UpdManual = $false
+            $script:UpdWaitTo = $null
+            if (!$u) {
+                Write-UpdLog 'check result is unreadable'
+                if ($manual) { Show-NomindBox -Title 'обновление' -Message 'Не удалось проверить обновления: пустой ответ.' | Out-Null }
+                return
+            }
+            if (!$u.Ok) {
+                Write-UpdLog ('check failed: ' + $u.Error)
+                if ($manual) { Show-NomindBox -Title 'обновление' -Message ('Не удалось проверить обновления: ' + $u.Error) | Out-Null }
+                return
+            }
+            if ($u.Available) {
+                Write-UpdLog ('available: ' + $u.Version + ' (current ' + $u.Current + ')')
+                Log ('доступно обновление ' + $u.Version)
+                if (!$script:UpdPrompted) {
+                    $script:UpdPrompted = $true
+                    Show-UpdatePrompt $u
+                }
+            } else {
+                Write-UpdLog ('up to date: ' + $u.Current)
+                if ($manual) { Show-NomindBox -Title 'обновление' -Message ('У вас последняя версия — ' + $u.Current + '.') | Out-Null }
+                try { $lblInfo.Text = 'обновлений нет' } catch { }
+            }
+            return
+        }
+        if ($script:UpdFetchProc) {
+            if (!$script:UpdFetchProc.HasExited) { return }
+            if (!$script:UpdFetchWaitTo) { $script:UpdFetchWaitTo = (Get-Date).AddSeconds(1); return }
+            if ((Get-Date) -lt $script:UpdFetchWaitTo) { return }
+            $script:UpdFetchWaitTo = $null
+            Complete-UpdateFetch
+        }
+    })
+    $script:UpdWatch.Start()
+
+    $script:UpdKick = New-Object Windows.Forms.Timer
+    $script:UpdKick.Interval = 6000
+    $script:UpdKick.Add_Tick({
+        $script:UpdKick.Stop()
+        try {
+            if ([bool](Get-AppSetting 'checkUpdates' $true)) { Start-UpdateCheck }
+        } catch { }
+    })
+    $script:UpdKick.Start()
 
     Start-PingScan
 

@@ -2,6 +2,9 @@
     [string]$Action = '',
     [string]$Server = '',
     [string]$OutFile = '',
+    [string]$Url = '',
+    [string]$Sha = '',
+    [string]$Ver = '',
     [int]$Part = 0,
     [int]$Parts = 1
 )
@@ -501,7 +504,16 @@ function New-Outbound($n) {
     $user = [ordered]@{ id = $n.uuid; encryption = 'none' }
     if ($n.flow) { $user.flow = $n.flow }
 
-    $ss = [ordered]@{ network = 'tcp'; security = 'reality' }
+    # Bezopasnost uzla zavisit ot ego dannyh: REALITY est tolko tam, gde panel
+    # vydala publicKey (pbk). Uzel s TLS/WS bez pbk nelzya opisyvat kak REALITY -
+    # Xray otkazyvaetsya gruzit ves konfig, i odin takoj uzel lomaet ves poisk.
+    $sec = ''
+    if ($n.security) { $sec = ([string]$n.security).ToLower() }
+    if ($n.pbk -and (!$sec -or $sec -eq 'reality')) { $sec = 'reality' }
+    if ($sec -eq 'reality' -and !$n.pbk) { $sec = '' }
+    if (!$sec) { if ($n.sni) { $sec = 'tls' } else { $sec = 'none' } }
+
+    $ss = [ordered]@{ network = 'tcp'; security = $sec }
     if ($n.network -and $n.network -ne 'tcp') { $ss.network = $n.network }
     if ($n.network -eq 'ws') {
         $ss.wsSettings = [ordered]@{ path = (IfEmpty $n.path '/') }
@@ -516,12 +528,20 @@ function New-Outbound($n) {
     if ($n.network -eq 'grpc') {
         $ss.grpcSettings = [ordered]@{ serviceName = (IfEmpty $n.serviceName '') }
     }
-    $ss.realitySettings = [ordered]@{
-        serverName  = $n.sni
-        fingerprint = (IfEmpty $n.fp 'chrome')
-        publicKey   = $n.pbk
-        shortId     = (IfEmpty $n.sid '')
-        spiderX     = '/'
+    if ($sec -eq 'reality') {
+        $ss.realitySettings = [ordered]@{
+            serverName  = (IfEmpty $n.sni $n.host)
+            fingerprint = (IfEmpty $n.fp 'chrome')
+            publicKey   = $n.pbk
+            shortId     = (IfEmpty $n.sid '')
+            spiderX     = '/'
+        }
+    }
+    elseif ($sec -eq 'tls') {
+        $ss.tlsSettings = [ordered]@{
+            serverName  = (IfEmpty $n.sni $n.host)
+            fingerprint = (IfEmpty $n.fp 'chrome')
+        }
     }
     return [ordered]@{
         tag            = 'proxy'
@@ -792,6 +812,111 @@ function Test-RealPing($n, $settings, [int]$timeoutMs = 12000, [int]$port = 1182
     }
 }
 
+# ---------- fast batch ping ----------
+# One xray process serves every node: an HTTP inbound per node, a vless
+# outbound per node, and an inboundTag -> outboundTag routing rule. Then one
+# curl per node runs in parallel. This replaces N xray process startups with
+# a single one, so a full scan takes seconds instead of tens of seconds.
+
+function New-PingBatchConfig($nodes, [int]$basePort, [string]$file) {
+    $inbounds = New-Object System.Collections.ArrayList
+    $outbounds = New-Object System.Collections.ArrayList
+    $rules = New-Object System.Collections.ArrayList
+    $sniff = [ordered]@{ enabled = $true; destOverride = @('http', 'tls', 'quic'); routeOnly = $false }
+    for ($i = 0; $i -lt $nodes.Count; $i++) {
+        $inTag = 'pin' + $i
+        $outTag = 'pout' + $i
+        [void]$inbounds.Add([ordered]@{
+            tag = $inTag; listen = '127.0.0.1'; port = ($basePort + $i)
+            protocol = 'http'; settings = [ordered]@{}; sniffing = $sniff
+        })
+        $ob = New-Outbound $nodes[$i]
+        $ob.tag = $outTag
+        [void]$outbounds.Add($ob)
+        [void]$rules.Add([ordered]@{ type = 'field'; inboundTag = @($inTag); outboundTag = $outTag })
+    }
+    [void]$outbounds.Add([ordered]@{ tag = 'direct'; protocol = 'freedom'; settings = [ordered]@{ domainStrategy = 'AsIs' } })
+    [void]$outbounds.Add([ordered]@{ tag = 'block'; protocol = 'blackhole' })
+    $cfg = [ordered]@{
+        log       = [ordered]@{ loglevel = 'warning' }
+        inbounds  = @($inbounds)
+        outbounds = @($outbounds)
+        routing   = [ordered]@{ domainStrategy = 'AsIs'; rules = @($rules) }
+    }
+    Write-Utf8 $file ($cfg | ConvertTo-Json -Depth 20)
+    return $file
+}
+
+function Invoke-BatchPing($nodes, $settings, [int]$basePort = 12200, [int]$requestMs = 6000) {
+    if (!$nodes -or @($nodes).Count -eq 0) { return @() }
+    $cfg = Join-Path $script:Run 'pingbatch-config.json'
+    New-PingBatchConfig $nodes $basePort $cfg | Out-Null
+    $err = Join-Path $script:Run 'pingbatch.err.log'
+    $out = Join-Path $script:Run 'pingbatch.out.log'
+    $p = $null
+    $reqs = New-Object System.Collections.ArrayList
+    $result = @{}
+    try {
+        $p = Start-Process -FilePath $script:Exe -ArgumentList @('-c', ('"' + $cfg + '"')) -WorkingDirectory $script:Bin -WindowStyle Hidden -RedirectStandardError $err -RedirectStandardOutput $out -PassThru
+
+        # all inbounds are bound together: wait for the first one only
+        $ready = $false
+        $deadline = (Get-Date).AddMilliseconds(2500)
+        while ((Get-Date) -lt $deadline) {
+            if ($p.HasExited) { break }
+            if (Test-LocalPort $basePort) { $ready = $true; break }
+            Start-Sleep -Milliseconds 40
+        }
+        if (!$ready) { return $null }   # caller falls back to the old per-node path
+
+        $sec = [string]([Math]::Round(($requestMs / 1000.0), 2))
+        for ($i = 0; $i -lt $nodes.Count; $i++) {
+            $key = Get-ServerKey $nodes[$i]
+            $of = Join-Path $script:Run ('pingbatch.' + $i + '.txt')
+            try { Remove-Item $of -Force -ErrorAction SilentlyContinue } catch { }
+            $cargs = @(
+                '-s', '-o', 'NUL', '-m', $sec,
+                # bez probela: Start-Process skleivaet argumenty cherez probel i
+                # inache -w razvalivaetsya na dva argumenta, a otvet ne parsitsya
+                '-w', '%{http_code},%{time_total}',
+                '-x', ('http://127.0.0.1:' + ($basePort + $i)),
+                'https://cp.cloudflare.com/generate_204'
+            )
+            $cp = Start-Process -FilePath 'curl.exe' -ArgumentList $cargs -WindowStyle Hidden -RedirectStandardOutput $of -PassThru
+            [void]$reqs.Add([pscustomobject]@{ Key = $key; Proc = $cp; File = $of })
+        }
+
+        $deadline = (Get-Date).AddMilliseconds($requestMs + 1200)
+        foreach ($r in $reqs) {
+            $left = [int]($deadline - (Get-Date)).TotalMilliseconds
+            if ($left -lt 1) { $left = 1 }
+            try { if (!$r.Proc.HasExited) { $r.Proc.WaitForExit($left) | Out-Null } } catch { }
+        }
+
+        foreach ($r in $reqs) {
+            $ms = -1
+            try {
+                $txt = ''
+                if (Test-Path $r.File) { $txt = [string](Get-Content $r.File -Raw -ErrorAction SilentlyContinue) }
+                $txt = $txt.Trim()
+                if ($txt -match '^(204|200),([0-9]+(?:[\.,][0-9]+)?)') {
+                    $t = [double](($Matches[2]) -replace ',', '.')
+                    if ($t -gt 0) { $ms = [int][Math]::Round($t * 1000) }
+                }
+            } catch { }
+            $result[$r.Key] = [pscustomobject]@{ Key = $r.Key; Tcp = 0; Real = $ms }
+        }
+    } finally {
+        try { if ($p -and !$p.HasExited) { $p.Kill() } } catch { }
+        foreach ($r in @($reqs)) {
+            try { if ($r.Proc -and !$r.Proc.HasExited) { $r.Proc.Kill() } } catch { }
+        }
+        Remove-Item $cfg -Force -ErrorAction SilentlyContinue
+        Get-ChildItem $script:Run -Filter 'pingbatch.*.txt' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+    return @($nodes | ForEach-Object { $result[(Get-ServerKey $_)] })
+}
+
 # ---------- status ----------
 
 function Get-State {
@@ -912,8 +1037,58 @@ if ($Action) {
             }
             if ($OutFile) { & $write $res }
         }
-        'subs' {
+        'pingfast' {
             $s = Get-Settings
+            $list = @(Get-Servers)
+            if ($Server) {
+                $one = Find-Server $Server $list
+                if (!$one) { throw 'Server not found' }
+                $list = @($one)
+            }
+            $write = {
+                param($data)
+                if (!$OutFile) { return }
+                for ($i = 0; $i -lt 6; $i++) {
+                    try { Write-Utf8 $OutFile ($data | ConvertTo-Json -Depth 4); return } catch { Start-Sleep -Milliseconds 80 }
+                }
+            }
+            $res = Invoke-BatchPing $list $s
+            if ($null -eq $res) {
+                # batch config failed to start - fall back to the per-node path
+                $acc = New-Object System.Collections.ArrayList
+                foreach ($n in $list) {
+                    $key = Get-ServerKey $n
+                    $tcp = Test-ServerTcp $n 1200
+                    $real = -1
+                    if ($tcp -ge 0) { $real = Test-RealPing $n $s 3500 11829 'pingfb' }
+                    [void]$acc.Add([pscustomobject]@{ Key = $key; Tcp = [int]$tcp; Real = [int]$real })
+                    if ($OutFile) { & $write $acc }
+                }
+                $res = @($acc)
+            }
+            if ($OutFile) { & $write $res }
+            else { foreach ($r in @($res)) { '{0,-40} real={1,5}' -f $r.Key, $r.Real } }
+        }
+        'updatecheck' {
+            . (Join-Path $script:Root 'updater.ps1')
+            $u = Invoke-UpdateCheck
+            $json = $u | ConvertTo-Json -Depth 4
+            if ($OutFile) { Write-Utf8 $OutFile $json } else { $json }
+        }
+        'updatefetch' {
+            . (Join-Path $script:Root 'updater.ps1')
+            $res = [pscustomobject]@{ Ok = $false; Path = ''; Error = '' }
+            try {
+                $u = [pscustomobject]@{ Version = $Ver; Url = $Url; Sha256 = $Sha }
+                $res.Path = Save-UpdateInstaller $u
+                $res.Ok = $true
+            } catch {
+                $res.Error = $_.Exception.Message
+            }
+            $json = $res | ConvertTo-Json -Depth 4
+            if ($OutFile) { Write-Utf8 $OutFile $json } else { $json }
+        }
+        'subs' {            $s = Get-Settings
             $list = @()
             if ($s -and $s.subs) { $list = @($s.subs) }
             $write = {

@@ -40,6 +40,7 @@ try {
         'engine.ps1',
         'NOMINDGuard.ps1',
         'NOMINDStop.ps1',
+        'updater.ps1',
         'NOMINDConnect.cmd',
         'NOMINDConnect.vbs',
         'NOMINDGuard.vbs',
@@ -54,7 +55,8 @@ try {
         'nomind.png',
         'installer/installer.nsi',
         'servers.sample.json',
-        'settings.sample.json'
+        'settings.sample.json',
+        'domains.sample.txt'
     )
 
     # --- allowlist: globs ---
