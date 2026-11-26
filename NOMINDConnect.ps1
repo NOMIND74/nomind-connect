@@ -215,6 +215,10 @@ public class SlimListBox : ListBox {
     [DllImport("user32.dll")] static extern bool ShowScrollBar(IntPtr h, int bar, bool show);
 
     public SlimListBox() {
+        // Owner-draw spisok bez etogo migaet na kazhdom Invalidate: shtrihovka
+        // ne uspevaet, i mezhdu pererisovkami probegaet fon.
+        this.DoubleBuffered = true;
+        this.SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
     }
 
     protected override CreateParams CreateParams {
@@ -1507,6 +1511,99 @@ $cardServers.Controls.Add($lstServers)
 $script:SrvScroll = Add-SlimScroll $lstServers $cardServers
 $script:Folded = @{}
 
+# ---- zmejka po konturu karty serverov: spokojnyj indikator fonovoj proverki ----
+$script:SnakeBusy = @{}
+$script:SnakeTimer = $null
+
+function Get-SnakePoint([double]$d, [double]$x, [double]$y, [double]$w, [double]$h) {
+    $per = 2 * ($w + $h)
+    if ($per -le 0) { return (New-Object Drawing.PointF([single]$x, [single]$y)) }
+    $d = $d % $per
+    if ($d -lt 0) { $d += $per }
+    if ($d -lt $w) { return (New-Object Drawing.PointF([single]($x + $d), [single]$y)) }
+    $d -= $w
+    if ($d -lt $h) { return (New-Object Drawing.PointF([single]($x + $w), [single]($y + $d))) }
+    $d -= $h
+    if ($d -lt $w) { return (New-Object Drawing.PointF([single]($x + $w - $d), [single]($y + $h))) }
+    $d -= $w
+    return (New-Object Drawing.PointF([single]$x, [single]($y + $h - $d)))
+}
+
+function Repaint-Snake {
+    try {
+        $w = $cardServers.Width
+        $h = $cardServers.Height
+        # Tolko chetyre uzkie polosy po krayu: spisok vnutri ne pererisovyvaetsya.
+        $cardServers.Invalidate((New-Object Drawing.Rectangle(0, 0, $w, 6)))
+        $cardServers.Invalidate((New-Object Drawing.Rectangle(0, ($h - 6), $w, 6)))
+        $cardServers.Invalidate((New-Object Drawing.Rectangle(0, 0, 6, $h)))
+        $cardServers.Invalidate((New-Object Drawing.Rectangle(($w - 6), 0, 6, $h)))
+    } catch { }
+}
+
+function Set-Snake([bool]$on, [string]$why = 'ping') {
+    if (!$script:SnakeBusy) { $script:SnakeBusy = @{} }
+    if ($on) { $script:SnakeBusy[$why] = $true } else { $script:SnakeBusy.Remove($why) }
+    $active = ($script:SnakeBusy.Count -gt 0)
+    if (!$cardServers.Tag -or !$cardServers.Tag.ContainsKey('phase')) { $cardServers.Tag = @{ phase = 0.0; pens = $null } }
+    $cardServers.Tag.phase = 0.0
+    Repaint-Snake
+    try {
+        if (!$script:SnakeTimer) { return }
+        if ($active) { $script:SnakeTimer.Start() } else { $script:SnakeTimer.Stop() }
+    } catch { }
+}
+
+$cardServers.Tag = @{ phase = 0.0; pens = $null }
+$cardServers.Add_Paint({
+    param($s, $e)
+    try {
+        if (!$script:SnakeBusy -or $script:SnakeBusy.Count -le 0) { return }
+        $g = $e.Graphics
+        $g.SmoothingMode = [Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $x = 2.0
+        $y = 2.0
+        $w = [double]($s.Width - 4)
+        $h = [double]($s.Height - 4)
+        if ($w -lt 16 -or $h -lt 16) { return }
+        $tag = $s.Tag
+        if (!$tag.pens) {
+            $alphas = @(240, 200, 165, 132, 104, 80, 60, 42)
+            $pens = @()
+            foreach ($a in $alphas) {
+                $p = New-Object Drawing.Pen([Drawing.Color]::FromArgb([int]$a, $script:C.Neon.R, $script:C.Neon.G, $script:C.Neon.B), [single]3)
+                $p.StartCap = [Drawing.Drawing2D.LineCap]::Round
+                $p.EndCap = [Drawing.Drawing2D.LineCap]::Round
+                $pens += $p
+            }
+            $tag.pens = $pens
+        }
+        # Golova bezhit, hvost rastvoryaetsya: vosem korotkih otrezkov s umenshayushchejsya prozrachnostyu.
+        $step = 8.0
+        $head = [double]$tag.phase
+        for ($i = 0; $i -lt 8; $i++) {
+            $p1 = Get-SnakePoint ($head - $i * $step) $x $y $w $h
+            $p2 = Get-SnakePoint ($head - ($i + 1) * $step) $x $y $w $h
+            $g.DrawLine($tag.pens[$i], $p1, $p2)
+        }
+        $dot = Get-SnakePoint $head $x $y $w $h
+        $hb = New-Object Drawing.SolidBrush($script:C.Neon)
+        $g.FillEllipse($hb, [single]($dot.X - 2.5), [single]($dot.Y - 2.5), [single]5, [single]5)
+        $hb.Dispose()
+    } catch { }
+})
+
+$script:SnakeTimer = New-Object Windows.Forms.Timer
+$script:SnakeTimer.Interval = 40
+$script:SnakeTimer.Add_Tick({
+    trap { continue }
+    try {
+        if (!$script:SnakeBusy -or $script:SnakeBusy.Count -le 0) { return }
+        $cardServers.Tag.phase = ([double]$cardServers.Tag.phase + 7.0) % 1000000.0
+        Repaint-Snake
+    } catch { }
+})
+
 function Draw-Flag($g, [string]$code, [single]$x, [single]$y, [single]$w, [single]$h) {
     $c = ([string]$code).Trim().ToUpper()
     if ($c.Length -ne 2) { return }   # net flaga - nichego ne risuem (nikakikh kvadratikov)
@@ -2051,9 +2148,11 @@ function Start-PingScan([string]$onlyKey = '') {
         }
         try { $lblInfo.Text = 'проверяю серверы в фоне…' } catch { }
         Update-PingButton
+        Set-Snake $true 'ping'
     } catch {
         $script:PingProcs = @()
         Update-PingButton
+        Set-Snake $false 'ping'
         Log ('не смог запустить проверку пинга: ' + $_.Exception.Message)
     }
 }
@@ -2071,9 +2170,11 @@ function Stop-PingScan {
             ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch { } }
     } catch { }
     # to, chto uzhe uspeli proverit, pokazyvaem srazu
-    try { foreach ($k in @(Read-PingScan)) { Set-PingInPlace $k } } catch { }
+    try { foreach ($k in @(Read-PingScan)) { Set-PingInPlace $k -Defer } } catch { }
+    try { $lstServers.Invalidate() } catch { }
     $script:PingProcs = @()
     $script:PingWaitTo = $null
+    Set-Snake $false 'ping'
     Update-PingButton
     try { $lblInfo.Text = 'проверка остановлена' } catch { }
     Log 'проверка пингов остановлена'
@@ -2232,14 +2333,24 @@ function Complete-UpdateFetch {
     $form.Close()
 }
 
-function Set-PingInPlace([string]$key) {
+function Repaint-ServerRow([int]$i) {
+    try {
+        if ($i -lt 0 -or $i -ge $lstServers.Items.Count) { $lstServers.Invalidate(); return }
+        $r = $lstServers.GetItemRectangle($i)
+        if ($r.Height -gt 0) { $lstServers.Invalidate($r) } else { $lstServers.Invalidate() }
+    } catch { try { $lstServers.Invalidate() } catch { } }
+}
+
+function Set-PingInPlace([string]$key, [switch]$Defer) {
     for ($i = 0; $i -lt $lstServers.Items.Count; $i++) {
         if ($lstServers.Items[$i].Key -ne $key) { continue }
         $it = $lstServers.Items[$i]
         $it.Ping = Get-PingText $key
         $it.Sort = Get-SortValue $key
         $it.Real = $script:Real.ContainsKey($key)
-        $lstServers.Invalidate()
+        # Pererisovyvaem tolko svoju stroku: ranee perekrashivalsya ves spisok,
+        # i pri potoke pongov eto vyglyadelo kak miganie.
+        if (!$Defer) { Repaint-ServerRow $i }
         return
     }
 }
@@ -2783,10 +2894,26 @@ function New-ToggleRow([int]$y, [string]$title, [string]$desc, [bool]$on, [scrip
     return $p
 }
 
+function Get-LastUpdateCheckText {
+    # Poslednyaya stroka runtime\updater.log: '2026-11-26 19:05:41  up to date: 1.0.2'
+    try {
+        $p = Join-Path $script:Run 'updater.log'
+        if (!(Test-Path $p)) { return 'обновления ещё не проверялись' }
+        $line = [string](Get-Content -LiteralPath $p -Tail 1 -Encoding UTF8 -ErrorAction Stop)
+        if (!$line) { return 'обновления ещё не проверялись' }
+        if ($line -match '^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})') {
+            return ('последняя проверка: ' + $matches[3] + '.' + $matches[2] + ' ' + $matches[4] + ':' + $matches[5])
+        }
+        return 'последняя проверка: недавно'
+    } catch {
+        return 'последняя проверка: неизвестно'
+    }
+}
+
 function Show-SettingsDialog {
     $dlg = New-Object Windows.Forms.Form
     $dlg.Text = 'NOMIND Connect — настройки'
-    $dlg.ClientSize = New-Object Drawing.Size(600, 470)
+    $dlg.ClientSize = New-Object Drawing.Size(600, 592)
     $dlg.FormBorderStyle = 'FixedSingle'
     $dlg.MaximizeBox = $false
     $dlg.MinimizeBox = $false
@@ -2830,9 +2957,39 @@ function Show-SettingsDialog {
         Restart-Tunnel 'настройки изменены'
     } 564
 
+    $rowUpd = New-ToggleRow 288 'Проверять обновления' 'Проверка при запуске, установка — с вашего согласия.' ([bool](Get-AppSetting 'checkUpdates' $true)) {
+        param($on)
+        Set-AppSetting 'checkUpdates' $on
+        Log ($(if ($on) { 'автопроверка обновлений включена' } else { 'автопроверка обновлений выключена' }))
+    } 564
+
+    $lblUpd = New-Object ShadowLabel
+    $lblUpd.AutoSize = $false
+    $lblUpd.Location = New-Object Drawing.Point(20, 389)
+    $lblUpd.Size = New-Object Drawing.Size(320, 22)
+    $lblUpd.TextAlign = 'MiddleLeft'
+    $lblUpd.ForeColor = $script:C.Muted
+    $lblUpd.Font = $FLabel
+    $lblUpd.Text = (Get-LastUpdateCheckText)
+
+    $btnCheck = New-Object ShadowButton
+    $btnCheck.Text = 'Проверить обновления'
+    Style-Button $btnCheck $false
+    # Na fone dialoga zalivka "kak u karty" vyglyadit kak vrezannoe pole,
+    # poetomu chut svetlee fona - knopka chitaetsya kak knopka.
+    $btnCheck.BackColor = $script:C.Card2
+    $wChk = [Windows.Forms.TextRenderer]::MeasureText('Проверить обновления', $FBody).Width + 48
+    $btnCheck.Size = New-Object Drawing.Size($wChk, 36)
+    $btnCheck.Left = $dlg.ClientSize.Width - 20 - $wChk
+    $btnCheck.Top = 382
+    $btnCheck.Add_Click({
+        $dlg.Close()
+        Start-UpdateCheck -Manual
+    })
+
     $lblHint = New-Object ShadowLabel
     $lblHint.AutoSize = $false
-    $lblHint.Location = New-Object Drawing.Point(20, 298)
+    $lblHint.Location = New-Object Drawing.Point(20, 438)
     $lblHint.Size = New-Object Drawing.Size(560, 72)
     $lblHint.ForeColor = $script:C.GoldDim
     $lblHint.Font = $FBody
@@ -2847,7 +3004,7 @@ function Show-SettingsDialog {
     $btnOk.Top = $dlg.ClientSize.Height - 18 - 38
     $btnOk.Add_Click({ $dlg.Close() })
 
-    $dlg.Controls.AddRange(@($rowApp, $rowGuard, $rowTray, $rowAds, $lblHint, $btnOk))
+    $dlg.Controls.AddRange(@($rowApp, $rowGuard, $rowTray, $rowAds, $rowUpd, $lblUpd, $btnCheck, $lblHint, $btnOk))
     $dlg.AcceptButton = $btnOk
     $dlg.CancelButton = $btnOk
     [void]$dlg.ShowDialog($form)
@@ -3531,8 +3688,10 @@ function Start-SubRefresh {
     try {
         $script:SubProc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argStr -WindowStyle Hidden -PassThru
         Log 'проверяю подписку: срок и новые серверы…'
+        Set-Snake $true 'subs'
     } catch {
         $script:SubProc = $null
+        Set-Snake $false 'subs'
         Log ('не смог запустить проверку подписки: ' + $_.Exception.Message)
     }
 }
@@ -3551,6 +3710,7 @@ function Complete-SubRefresh {
     } catch { }
     $script:SubProc = $null
     $script:SubWaitTo = $null
+    Set-Snake $false 'subs'
     if (!$raw -or !$raw.Trim()) {
         Log 'подписка не ответила — попробуйте позже'
         Update-SubBadge
@@ -4156,9 +4316,10 @@ $form.Add_Shown({
             if (@($script:PingProcs).Count -eq 0) { return }
             if (!$script:PingWaitTo) { $script:PingWaitTo = (Get-Date).AddSeconds(2); return }
             if ((Get-Date) -lt $script:PingWaitTo) { return }
-            foreach ($k in @(Read-PingScan)) { Set-PingInPlace $k }
+            foreach ($k in @(Read-PingScan)) { Set-PingInPlace $k -Defer }
             $script:PingProcs = @()
             $script:PingWaitTo = $null
+            Set-Snake $false 'ping'
             Update-PingButton
             Refresh-Servers
             $alive = @($script:Real.Keys | Where-Object { $script:Real[$_] -ge 0 }).Count
@@ -4168,20 +4329,13 @@ $form.Add_Shown({
             Update-State
             return
         }
-        foreach ($k in @(Read-PingScan)) { Set-PingInPlace $k }
+        foreach ($k in @(Read-PingScan)) { Set-PingInPlace $k -Defer }
+        # Odna pererisovka na tik vmesto odnoj na uzel.
+        try { $lstServers.Invalidate() } catch { }
     })
     $script:PingWatch.Start()
 
-    # pulsirovanie knopki "proverit vse", poka idet proverka
-    $script:PingPulse = New-Object Windows.Forms.Timer
-    $script:PingPulse.Interval = 120
-    $script:PingPulse.Add_Tick({
-        trap { continue }
-        if (!(Test-PingBusy)) { return }
-        $script:Pulse += 0.26
-        try { $btnTest.Invalidate() } catch { }
-    })
-    $script:PingPulse.Start()
+    # pulsirovanie knopki ubrano: edinstvennyj indikator proverki - zmejka po konturu
 
     $script:PingAuto = New-Object Windows.Forms.Timer
     $script:PingAuto.Interval = ($script:PingEveryMin * 60 * 1000)
