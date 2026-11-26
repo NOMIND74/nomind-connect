@@ -56,14 +56,15 @@ try {
         'installer/installer.nsi',
         'servers.sample.json',
         'settings.sample.json',
-        'domains.sample.txt'
+        'domains.sample.txt',
+        'tools/fetch-xray.ps1',
+        'tools/secure-opencode.ps1',
+        'tools/update-keygen.ps1'
     )
 
-    # --- allowlist: globs ---
+    # --- allowlist: globs (no broad tools/** - new files must be added explicitly) ---
     $allowedGlobs = @(
         'fonts/*',
-        'tools/*',
-        'tools/**/*',
         '.github/*',
         '.github/**/*',
         '.opencode/agents/*.md'
@@ -79,9 +80,10 @@ try {
 
     function Test-Forbidden([string]$rel) {
         if ($rel -match '(^|/)(servers|settings)\.json$') { return $true }
+        if ($rel -match '\.json$' -and $rel -notmatch '^(servers\.sample|settings\.sample|version)\.json$') { return $true }
         if ($rel -match '(^|/)domains\.txt$') { return $true }
         if ($rel -match '^(runtime|dist|installer/stage|installer/defaults)/') { return $true }
-        if ($rel -match '\.(exe|zip|7z|rar|log|bak|tmp|pem|key|pfx)$') { return $true }
+        if ($rel -match '\.(exe|zip|7z|rar|log|bak|tmp|pem|key|pfx|bin|dat|db|sqlite)$') { return $true }
         if ($rel -match '(^|/)\.env(\.|$)') { return $true }
         return $false
     }
@@ -131,8 +133,26 @@ try {
         exit 0
     }
 
+    # --- every tracked file must stay inside the allowlist ---
+    # git add/reset does not remove a file that was committed earlier, so check
+    # the whole index: a personal file must never survive in the repository.
+    $tracked = @(& git ls-files | Where-Object { $_ })
+    foreach ($rel in $tracked) {
+        $rel = $rel -replace '\\', '/'
+        if ((Test-Forbidden $rel) -or !(Test-Allowed $rel)) {
+            & git reset -q
+            Stop-Publish ('tracked file outside allowlist: ' + $rel)
+        }
+    }
+
     # --- secrets ---
-    if (!$SkipScan) {
+    if ($SkipScan) {
+        $ans = Read-Host 'Secret scan is DISABLED. Type YES to continue'
+        if ($ans -ne 'YES') {
+            & git reset -q
+            Stop-Publish 'cancelled'
+        }
+    } else {
         & (Join-Path $root 'scan-secrets.ps1') -Staged -Root $root
         if ($LASTEXITCODE -ne 0) {
             & git reset -q
